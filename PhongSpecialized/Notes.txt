@@ -1,0 +1,224 @@
+Notes
+
+BRDF - Bidirectional Reflectance Distribution Function
+
+----------------------------------------
+
+Diffuse BRDF
+Lambert
+
+f(l, v) = cdiff / pi
+cdiff = diffuse albedo of the material
+
+----------------------------------------
+
+Microfacet Specular BRDF
+Cook-Torrance
+
+f(l, v) = D(h)F(v, h)G(l, v h) /
+             4(n * l)(n * v)    
+
+Specular D - Normal Distribution
+GGX/Trowbridge-Reitz(Disney)
+
+--a is substitute for symbol alpha--
+
+D(h) =             a^2 /
+       pi((n * h)^2(a^2 - 1) + 1)^2
+
+a = Roughness^2
+
+Specular G - Geometric Attenuation
+Schlick Modified (k = a/2) --a is sub for symbol alpha-
+
+k = (Roughness + 1)^2 /
+            8
+
+G (v) =       n * v /
+ 1      (n * v)(1 - k) + k
+
+G(l, v, h) = G (l)G (v)
+              1    1
+
+Specular F - Fresnel
+Schlick Modified(Power Replacement)
+
+F(v, h) = F  + (1- F )2(-5.55473(v * h)-6.98316)(v * h)
+           0        0
+
+F  = Specular reflectance at normal incidence
+ 0
+
+----------------------------------------
+
+Image-Based Lighting
+                                N
+∫ L (l)f(l, v)costheta dl ≈ 1/  Σ   L (l )f(l , v)costheta   /  p(l , v)
+H  i                  1     N  k=1   i  k    k            1        k
+                                                           k
+
+That's one motherfucking scary thing i've just written down. Here's some HLSL that does the same thing.
+float3 ImportanceSampleGGX( float2 Xi, float Roughness, float3 N )
+{
+	float a = Roughness * Roughness;
+	float Phi = 2 * PI * Xi.x;
+	float CosTheta = sqrt( (1 - Xi.y) / ( 1 + (a*a - 1) * Xi.y ) );
+	float SinTheta = sqrt( 1 - CosTheta * CosTheta );
+	float3 H;
+	H.x = SinTheta * cos( Phi );
+	H.y = SinTheta * sin( Phi );
+	H.z = CosTheta;
+	float3 UpVector = abs(N.z) < 0.999 ? float3(0,0,1) : float3(1,0,0);
+	float3 TangentX = normalize( cross( UpVector, N ) );
+	float3 TangentY = cross( N, TangentX );
+	// Tangent to world space
+	return TangentX * H.x + TangentY * H.y + N * H.z;
+}
+float3 SpecularIBL( float3 SpecularColor , float Roughness, float3 N, float3 V )
+{
+	float3 SpecularLighting = 0;
+	const uint NumSamples = 1024;
+	for( uint i = 0; i < NumSamples; i++ )
+	{
+		float2 Xi = Hammersley( i, NumSamples );
+		float3 H = ImportanceSampleGGX( Xi, Roughness, N );
+		float3 L = 2 * dot( V, H ) * H - V;
+		float NoV = saturate( dot( N, V ) );
+		float NoL = saturate( dot( N, L ) );
+		float NoH = saturate( dot( N, H ) );
+		float VoH = saturate( dot( V, H ) );
+		if( NoL > 0 )
+		{
+			float3 SampleColor = EnvMap.SampleLevel( EnvMapSampler , L, 0 ).rgb;
+			float G = G_Smith( Roughness, NoV, NoL );
+			float Fc = pow( 1 - VoH, 5 );
+			float3 F = (1 - Fc) * SpecularColor + Fc;
+			// Incident light = SampleColor * NoL
+			// Microfacet specular = D*G*F / (4*NoL*NoV)
+			// pdf = D * NoH / (4 * VoH)
+			SpecularLighting += SampleColor * F * G * VoH / (NoH * NoV);
+		}
+	}
+
+return SpecularLighting / NumSamples;
+
+}
+
+----------------------------------------
+
+Split Sum Approximation
+
+    N                                  N                  N
+1/  Σ   L (l )f(l , v)costheta  ≈ (1/  Σ   L (l ) ) (1/   Σ  f(l , v)costheta   / p(l , v) )
+N  k=1   i  k    k            1    N  k=1   i  k     N   k=1    k            1       k
+                               k                                              k
+
+Jesus Christ what the fuck - Samuel L. Jackson
+
+----------------------------------------
+
+Pre-Filtered Environment Map
+Thank god for HLSL
+
+float3 PrefilterEnvMap( float Roughness, float3 R )
+{
+	float3 N = R;
+	float3 V = R;
+	float3 PrefilteredColor = 0;
+	const uint NumSamples = 1024;
+	for( uint i = 0; i < NumSamples; i++ )
+	{
+		float2 Xi = Hammersley( i, NumSamples );
+		float3 H = ImportanceSampleGGX( Xi, Roughness, N );
+		float3 L = 2 * dot( V, H ) * H - V;
+		float NoL = saturate( dot( N, L ) );
+		if( NoL > 0 )
+		{
+		PrefilteredColor += EnvMap.SampleLevel( EnvMapSampler , L, 0 ).rgb * NoL;
+		TotalWeight += NoL;
+		}
+	}
+	return PrefilteredColor / TotalWeight;
+}
+
+----------------------------------------
+
+Environment BRDF
+
+∫ f(l, v)costheta dl = F   ∫  f(l, v) / * (1 - (1- v * h)^5)costheta dl + ∫  f(l, v) / * (1 - v * h)^5 costheta dl
+H                1      0  H  F(v, h)                               1     H  F(v, h)                           1
+
+Precalculate result of function; store in R16G16 format texture.
+
+float2 IntegrateBRDF( float Roughness, float NoV )
+{
+	float3 V;
+	V.x = sqrt( 1.0f - NoV * NoV ); // sin
+	V.y = 0;
+	V.z = NoV; // cos
+	float A = 0;
+	float B = 0;
+	const uint NumSamples = 1024;
+	for( uint i = 0; i < NumSamples; i++ )
+	{
+		float2 Xi = Hammersley( i, NumSamples );
+		float3 H = ImportanceSampleGGX( Xi, Roughness, N );
+		float3 L = 2 * dot( V, H ) * H - V;
+		float NoL = saturate( L.z );
+		float NoH = saturate( H.z );
+		float VoH = saturate( dot( V, H ) );
+		if( NoL > 0 )
+		{
+			float G = G_Smith( Roughness, NoV, NoL );
+			float G_Vis = G * VoH / (NoH * NoV);
+			float Fc = pow( 1 - VoH, 5 );
+			A += (1 - Fc) * G_Vis;
+			B += Fc * G_Vis;
+		}
+	}
+	return float2( A, B ) / NumSamples;
+}
+
+TO approximate the importance sampled reference, we multiply the two pre-calculated sums.
+
+float3 ApproximateSpecularIBL( float3 SpecularColor , float Roughness, float3 N, float3 V )
+{
+	float NoV = saturate( dot( N, V ) );
+	float3 R = 2 * dot( V, N ) * N - V;
+	float3 PrefilteredColor = PrefilterEnvMap( Roughness, R );
+	float2 EnvBRDF = IntegrateBRDF( Roughness, NoV );
+	return PrefilteredColor * ( SpecularColor * EnvBRDF.x + EnvBRDF.y );
+}
+
+----------------------------------------
+
+Material Model
+
+BaseColor       Single color. Easier concept to understand.
+Metallic        No need to understand dielectric and conductor reflectance, so less room for error.
+Roughness       Very clear in its meaning, whereas gloss always needs explaining.
+Cavity          Used for small-scale shadowing.
+
+Special Cases
+
+Subsurface      Samples shadow maps differently.
+Anisotropy      Requires many IBL samples.
+Clearcoat       Requires double IBL samples.
+Sheen           Not well defined..
+
+----------------------------------------
+
+Lighting Model
+
+falloff = saturate(1 - (distance / lightRadius)^4)^2 /
+                   distance^2 + 1
+
+----------------------------------------
+                    
+Specular D MODIFICIATION
+a = alpha
+
+a = saturate(a + sourceRadius /)
+                 2 * distance
+
+MAKES GLOSSY MATERIALS APPEAR ROUGH, BUT REFLECTIONS LOOK BALLIN'

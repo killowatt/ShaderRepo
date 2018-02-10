@@ -1,0 +1,57 @@
+#version 430
+#define PI 3.14159265
+
+// Inputs
+in vec3 fNormal;
+
+// Material
+float reflectance = 1.0; // 0 to 1
+float roughness = 0.5;
+vec3 specularColor = vec3(1.0, 1.0, 1.0); // f0
+
+// Values
+vec3 lightVector = vec3(1.5, 1.5, 1.5); // Light (l)
+vec3 eyeVector = vec3(2.75, 1.25, 1.25); // Camera (v)
+vec3 halfVector = lightVector + eyeVector / abs(lightVector + eyeVector); // Half Vector (h)
+
+// Misc
+float NoL = dot(fNormal, lightVector); // Normal dot LightVector (n.l)
+
+out vec4 fColor; // Output Color
+
+// Specular
+vec3 D(vec3 h) // GGX/Trowbridge-Reitz
+{
+	float alpha = roughness * roughness;
+	vec3 NxH = fNormal * h;
+	float alphaTerm = (alpha * alpha - 1.0) + 1.0;
+	return PI * ((NxH * NxH) * (alphaTerm * alphaTerm));
+}
+vec3 Gsub(vec3 v) // G Sub Function
+{
+	float k = (roughness + 1.0) * (roughness + 1.0) / 8;
+	return fNormal * v / (fNormal * v) * (1.0 - k) + k;
+}
+vec3 G(vec3 l, vec3 v, vec3 h) // Schlick Modified
+{
+	return Gsub(l) * Gsub(v);
+}
+vec3 F(vec3 v, vec3 h)  // Schlick Modified
+{
+	vec3 f0 = specularColor; // I guess?
+	float rediculousPower = (-5.55473 * (v * h) - 6.98316) * (v * h);
+	return f0 + (1.0 - f0) * pow(2.0, rediculousPower);
+}
+vec3 diffuse()
+{
+	vec3 result = vec3(reflectance / PI);
+	return result * NoL;
+}
+vec3 specular()
+{
+	return D(halfVector) * F(eyeVector, halfVector) * G(lightVector, eyeVector, halfVector) / 4 * (fNormal * lightVector) * (fNormal * eyeVector);
+}
+void main()
+{
+	fColor = vec4(specular(), 1.0);
+}
